@@ -384,20 +384,33 @@ def color_line(
     return line
 
 
-def finding_to_line(finding: Dict[str, Any], color_output: bool) -> Iterator[str]:
+def finding_to_raw_lines(
+    finding: Dict[str, Any], color_output: bool = False
+) -> Iterable[str]:
+    path = finding.get("path")
+    start_line = finding.get("start", {}).get("line")
+    end_line = finding.get("end", {}).get("line")
+    if path and start_line:
+        file_lines = fetch_lines_in_file(Path(path), start_line, end_line)
+        if file_lines:
+            return file_lines
+    yield from ()
+
+
+def finding_to_line(
+    finding: Dict[str, Any], color_output: bool = False
+) -> Iterator[str]:
     path = finding.get("path")
     start_line = finding.get("start", {}).get("line")
     end_line = finding.get("end", {}).get("line")
     start_col = finding.get("start", {}).get("col")
     end_col = finding.get("end", {}).get("col")
-    if path and start_line:
-        file_lines = fetch_lines_in_file(Path(path), start_line, end_line)
-        if file_lines:
-            for i, line in enumerate(file_lines):
-                if color_output:
-                    yield f"{colorama.Fore.GREEN}{start_line + i}{colorama.Style.RESET_ALL}:{color_line(line.rstrip(), start_line + i, start_line, start_col, end_line, end_col)}"
-                else:
-                    yield f"{start_line + i}:{line.rstrip()}"
+    file_lines = finding.get("extra", {}).get("file_lines")
+    for i, line in enumerate(file_lines):
+        if color_output:
+            yield f"{colorama.Fore.GREEN}{start_line + i}{colorama.Style.RESET_ALL}:{color_line(line.rstrip(), start_line + i, start_line, start_col, end_line, end_col)}"
+        else:
+            yield f"{start_line + i}:{line.rstrip()}"
 
 
 def build_normal_output(
@@ -523,6 +536,18 @@ def dump_parsed_ast(
             print_error(f"error invoking sgrep with:\n\t{' '.join(cmd)}\n{ex}")
             print_error_exit(f"\n\n{PLEASE_FILE_ISSUE_TEXT}")
         print(output.decode())
+
+
+def add_finding_line(outputs: List[Any]) -> List[Any]:
+    for r in outputs:
+        r["extra"]["file_lines"] = list(finding_to_raw_lines(r))
+    return outputs
+
+
+def clean_output(outputs: List[Any]) -> List[Any]:
+    for r in outputs:
+        del r["extra"]["metavars"]
+    return outputs
 
 
 # entry point
@@ -698,6 +723,9 @@ def main(args: argparse.Namespace) -> Dict[str, Any]:
         print_error(
             f"warning: ignored {ignored_in_tests} results in tests due to --exclude-tests option"
         )
+
+    outputs_after_booleans = add_finding_line(outputs_after_booleans)
+    outputs_after_booleans = clean_output(outputs_after_booleans)
 
     # output results
     output_data = {
