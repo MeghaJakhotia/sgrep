@@ -1,10 +1,25 @@
-_build
+# dune
+_build/
+# starting from dune 2.8.2, those are actually not generated anymore
 .merlin
 
-sgrep/sgrep.install
-/project.el
-/skip_list.txt
+# opam files are now generated from dune-project when running 'dune build':
+/*.opam
+# but we keep the one used for installing the project dependencies with
+# 'opam install --deps-only .':
+!/semgrep.opam
+
+# local opam switch
+_opam/
+
+# bisect_ppx
+_coverage/
+*.coverage
+
+# pad's stuff (but better to put in ~pad/config/commons/gitignore)
 /top.ml
+# codegraph serialized database
+*.marshall
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
@@ -58,6 +73,10 @@ coverage.xml
 *.py,cover
 .hypothesis/
 .pytest_cache/
+
+# src/targeting/Unit_guess_lang.ml creates a top-level tmp folder
+# "We don't delete the files when we're done because it's easier when troubleshooting tests."
+/tmp/
 
 # Translations
 *.mo
@@ -138,3 +157,53 @@ dmypy.json
 
 # Vim
 .*.sw*
+
+# Pycharm
+.idea/
+
+# OSX
+*.DS_Store
+
+### custom stuff
+
+# JS stuff
+*.vscode-test
+out
+
+# semgrep-core build artifacts
+TAGS
+log_config.json
+.vscode/settings.json
+/scripts/oncall-email/today.json
+/scripts/oncall-email/yesterday.json
+
+# Do not check in compiled binaries
+/cli/src/semgrep/bin/*
+!/cli/src/semgrep/bin/__init__.py
+
+# Ignore bench files
+perf/bench
+!perf/bench/dogfood
+!perf/bench/gitlab
+!perf/bench/dummy
+
+# Local actions testing
+act/
+
+# editor
+*.code-workspace
+.vscode
+
+# .history is here twice because if you ignore history you are doomed to repeat it
+/.history/
+/.history/
+
+# Artifacts from CI
+scripts/release/release_body.txt
+
+# nix
+result
+# direnv
+.direnv
+# Personal symlink to semgrep-proprietary used by 'make pro'
+/semgrep-proprietary

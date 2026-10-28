@@ -1,0 +1,38 @@
+; Various operations having to do with selection of files in Semgrep.
+; What they have in common is:
+; - dependency on utilities to manipulate file paths (e.g. globbing);
+; - no dependency on full-fledged language parsing or the resulting ASTs.
+
+(library
+ (public_name semgrep.targeting)
+ (name semgrep_targeting)
+ (wrapped false)
+ (libraries
+   commons
+
+   fpath
+   glob
+   gitignore
+   git_wrapper
+
+   semgrep.core
+ )
+ (preprocess
+   (pps
+     ppx_profiling
+     ppx_deriving.show
+     ppx_deriving.eq
+     ppx_hash
+   )
+ )
+)
+
+(rule
+ (targets Input_to_core_j.ml Input_to_core_j.mli)
+ (deps    Input_to_core.atd)
+ (action  (run atdgen -j -j-std %{deps})))
+
+(rule
+ (targets Input_to_core_t.ml Input_to_core_t.mli)
+ (deps    Input_to_core.atd)
+ (action  (run atdgen -t %{deps})))

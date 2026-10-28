@@ -1,0 +1,8 @@
+(library
+  (name spacegrep_tests)
+  (libraries
+     spacegrep
+     alcotest
+     testo
+  )
+)

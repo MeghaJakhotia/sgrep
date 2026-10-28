@@ -1,0 +1,13 @@
+
+(library
+ (public_name tracing)
+ (wrapped false)
+  (libraries
+    trace
+  )
+ (virtual_modules tracing)
+ (default_implementation tracing.unix)
+  (preprocess (pps
+      ppx_deriving.show
+   ))
+)

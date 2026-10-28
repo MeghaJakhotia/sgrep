@@ -1,9 +1,10 @@
-# Contributing
+<!--
+   Unfortunately GitHub doesn't render symlinks as clickable, otherwise
+   this file would be a symlink.
+-->
 
-## Latest build [![CircleCI](https://circleci.com/gh/returntocorp/sgrep.svg?style=svg)](https://circleci.com/gh/returntocorp/sgrep)
+Thank you for your interest in contributing to the Semgrep source code!
 
-`sgrep` is LGPL-licensed and we would love your contributions. See docs/development.md
+Find contribution guidelines in **[Semgrep documentation](https://semgrep.dev/docs/contributing/contributing/)**.
 
-We have [Circle CI](https://circleci.com/gh/returntocorp/sgrep) builds running on this project and forks.
-
-Please make your PR against `develop`. Merges to `master` require 1 approval and then will auto build a [docker image](https://hub.docker.com/r/returntocorp/sgrep) and a release for mac.
+Specifically, see **[Contributing code](https://semgrep.dev/docs/contributing/contributing-code/)** to contribute either to Semgrep source code or semgrep-core source code.

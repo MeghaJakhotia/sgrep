@@ -1,0 +1,24 @@
+; OCaml implementation of the 'semgrep test' subcommand.
+
+(library
+  (public_name semgrep.osemgrep_cli_test)
+  (name osemgrep_cli_test)
+  (wrapped false)
+  (libraries
+    cmdliner
+    commons
+
+    semgrep.engine
+    semgrep.engine.tests
+    osemgrep_core
+    osemgrep_networking
+  )
+ (preprocess
+   (pps
+     ppx_profiling
+     ppx_deriving.show
+     ppx_deriving.eq
+     ppx_hash
+   )
+ )
+)

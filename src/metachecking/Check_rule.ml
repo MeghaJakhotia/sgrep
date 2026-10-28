@@ -1,0 +1,359 @@
+(* Yoann Padioleau
+ *
+ * Copyright (C) 2019-2021 Semgrep Inc.
+ *
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public License
+ * version 2.1 as published by the Free Software Foundation, with the
+ * special exception on linking described in file LICENSE.
+ *
+ * This library is distributed in the hope that it will be useful, but
+ * WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the file
+ * LICENSE for more details.
+ *)
+open Common
+open Fpath_.Operators
+module FT = File_type
+open Rule
+module R = Rule
+module E = Core_error
+module P = Pattern_match
+module RP = Core_result
+module SJ = Semgrep_output_v1_j
+module Set = Set_
+module OutJ = Semgrep_output_v1_t
+
+(*****************************************************************************)
+(* Prelude *)
+(*****************************************************************************)
+(* Checking the checker (metachecking).
+ *
+ * The goal of this module is to detect bugs, performance issues, or
+ * to suggest the use of certain features in semgrep rules. This enables
+ * `semgrep --check-rules`, which users can run to verify their rules
+ *
+ * Called via `semgrep-core -check_rules <metachecks> <files or dirs>`
+ *
+ * There are two kinds of checks:
+ * - OCaml checks implemented directly in this file
+ * - semgrep checks passed in via metachecks
+ *     (by default, semgrep will call this with the rules in the rulepack
+ *      https://semgrep.dev/p/semgrep-rule-lints)
+ *
+ * Both are necessary because semgrep checks are easier to write, especially
+ * for security experts, but not all checks can be expressed with semgrep.
+ * Whenever possible, add a check by contributing to p/semgrep-rule-lints
+ *
+ * We chose to have `-check_rules` run both kinds of checks to make the
+ * logic in semgrep simpler. This way, semgrep will receive a list of errors
+ * and only have to display them.
+ *
+ * Alternatives considered were having `-check_rules` only run the OCaml checks
+ * and have semgrep call `semgrep-core -rules` on the checks
+ *
+ * TODO: make it possible to run `semgrep-core -check_rules` with no metachecks
+ *)
+
+(*****************************************************************************)
+(* Types *)
+(*****************************************************************************)
+exception No_metacheck_file of string
+
+type env = { r : Rule.t; errors : Core_error.t list ref }
+
+(*****************************************************************************)
+(* Helpers *)
+(*****************************************************************************)
+
+let error env t s =
+  let loc = Tok.unsafe_loc_of_tok t in
+  let _check_idTODO = "semgrep-metacheck-builtin" in
+  let rule_id, _ = env.r.id in
+  let err = E.mk_error (Some rule_id) loc s OutJ.SemgrepMatchFound in
+  Stack_.push err env.errors
+
+(*****************************************************************************)
+(* Checks *)
+(*****************************************************************************)
+
+let mv_error env mv t =
+  (* TODO make this message more helpful by detecting specific
+     variants of this *)
+  error env t
+    (mv
+   ^ " is used in a 'metavariable-*' conditional or 'focus-metavariable' \
+      operator but is never bound by a positive pattern (or is only bound by \
+      negative patterns like 'pattern-not')")
+
+let mvar_is_ok mv mvs =
+  (* TODO: remove first condition when we kill numeric capture groups *)
+  Metavariable.is_metavar_for_capture_group mv || Set.mem mv mvs
+
+let check_mvars_of_condition env bound_mvs (t, condition) =
+  match condition with
+  | CondEval _ -> ()
+  | CondRegexp (mv, _, _)
+  | CondType (mv, _, _, _)
+  | CondName (mv, _)
+  | CondNestedFormula (mv, _, _)
+  | CondAnalysis (mv, _) ->
+      if not (mvar_is_ok mv bound_mvs) then mv_error env mv t
+
+let check_mvars_of_focus env bound_mvs (t, mv_list) =
+  mv_list
+  |> List.iter (fun mv ->
+         if not (mvar_is_ok mv bound_mvs) then mv_error env mv t)
+
+let unknown_metavar_in_comparison env f =
+  let rec collect_metavars parent_mvs { f; conditions; focus; fix = _; as_ } :
+      MV.mvar Set.t =
+    (* Check the metavariables in the conditions (e.g. metavariable-pattern).
+       From here on, both the metavariables from the conjuncts and the
+       metavariables from the parent are already bound *)
+    let inner_mvs = collect_metavars' parent_mvs f in
+    let bound_mvs_for_conds = Set.union inner_mvs parent_mvs in
+    conditions |> List.iter (check_mvars_of_condition env bound_mvs_for_conds);
+    (* Now collect the metavariables defined in the conditions, which could
+       be used in the focus-metavariable clauses, and check nested formulas *)
+    let cond_mvs =
+      conditions
+      |> List_.map (fun (_, condition) ->
+             match condition with
+             | CondEval _
+             | CondType _
+             | CondAnalysis _
+             | CondName _ ->
+                 Set.empty
+             | CondRegexp (_, regex, _) ->
+                 Metavariable.mvars_of_regexp_string regex |> Set_.of_list
+             | CondNestedFormula (_, _, formula) ->
+                 collect_metavars bound_mvs_for_conds formula)
+      |> List.fold_left Set.union Set.empty
+    in
+
+    (* Check the focus-metavariable clauses last since they can use metavariables
+       in any clause within the And *)
+    let bound_mvs_for_focus = Set.union cond_mvs bound_mvs_for_conds in
+    focus |> List.iter (check_mvars_of_focus env bound_mvs_for_focus);
+    (* Return only the metavariables that were newly bound in this node *)
+    let mvs = Set.union cond_mvs inner_mvs in
+    let mvs_with_as =
+      match as_ with
+      | None -> mvs
+      | Some as_ -> Set.add as_ mvs
+    in
+    mvs_with_as
+  and collect_metavars' parent_mvs kind : MV.mvar Set.t =
+    match kind with
+    | P { pat; pstr = pstr, _; pid = _pid } ->
+        (* TODO currently this guesses that the metavariables are the strings
+           that have a valid metavariable name. We should ideally have each
+           matcher expose the metavariables it detects. *)
+        (* First get the potential metavar ellipsis words *)
+        let words_with_dot = Str.split (Str.regexp "[^a-zA-Z0-9_\\.$]") pstr in
+        let ellipsis_metavars =
+          words_with_dot |> List.filter Metavariable.is_metavar_ellipsis
+        in
+        (* Then split the individual metavariables *)
+        let words = List.concat_map (String.split_on_char '.') words_with_dot in
+        let metavars = words |> List.filter Metavariable.is_metavar_name in
+        (* Then, for a pattern-regex, get all the named capture groups, and
+           account for the metavariables introduced by their matches.
+        *)
+        let regexp_captured_mvars =
+          match pat with
+          | Xpattern.Regexp s -> Metavariable.mvars_of_regexp_string s
+          | __else__ -> []
+        in
+        [ metavars; ellipsis_metavars; regexp_captured_mvars ]
+        |> List_.map Set.of_list
+        |> List.fold_left Set.union Set.empty
+    | Inside (_, f)
+    | Anywhere (_, f) ->
+        collect_metavars parent_mvs f
+    | Not (_, _) -> Set.empty
+    | And (_, xs)
+    | Or (_, xs) ->
+        (* Collect and check from the conjuncts. Pass down the metavariables
+           from the parent *)
+        let mv_sets = List_.map (collect_metavars parent_mvs) xs in
+        List.fold_left
+          (* TODO originally we took the intersection, since strictly
+           * speaking a metavariable needs to be in all cases of a pattern-either
+           * to be bound. However, due to how the pattern is transformed, this
+           * is not always enforced, so the metacheck is too strict
+           *
+          (fun acc mv_set ->
+            if acc == Set.empty then mv_set else Set.inter acc mv_set)
+           *)
+            (fun acc mv_set -> Set.union acc mv_set)
+          Set.empty mv_sets
+  in
+  let _ = collect_metavars Set.empty f in
+  ()
+
+(* call Check_pattern subchecker *)
+let check_pattern (lang : Xlang.t) f =
+  visit_new_formula
+    (fun { pat; pstr = _pat_str; pid = _ } ~inside:_ ->
+      match (pat, lang) with
+      | Sem ((lazy semgrep_pat), _lang), L (lang, _rest) ->
+          Check_pattern.check lang semgrep_pat
+      | Spacegrep _spacegrep_pat, LSpacegrep -> ()
+      | Aliengrep _aliengrep_pat, LAliengrep -> ()
+      | Regexp _, _ -> ()
+      | _ -> raise Impossible)
+    f
+
+(*****************************************************************************)
+(* Formula *)
+(*****************************************************************************)
+
+let check_formula env (lang : Xlang.t) f =
+  check_pattern lang f;
+  unknown_metavar_in_comparison env f;
+  List.rev !(env.errors)
+
+(*****************************************************************************)
+(* Entry points *)
+(*****************************************************************************)
+
+let check r =
+  (* less: maybe we could also have formula_old specific checks *)
+  match r.mode with
+  | `Search f
+  | `Extract { formula = f; _ } ->
+      check_formula { r; errors = ref [] } r.target_analyzer f
+  | `Taint _ -> (* TODO *) []
+  | `Steps _ -> (* TODO *) []
+  | `SCA _ -> (* TODO *) []
+
+let semgrep_check (caps : < Cap.tmp >) config metachecks rules :
+    Core_error.t list =
+  let match_to_semgrep_error (m : Pattern_match.t) : Core_error.t =
+    let loc, _ = m.P.range_loc in
+    (* TODO use the end location in errors *)
+    let s = m.rule_id.message in
+    let _check_id = m.rule_id.id in
+    (* TODO: why not set ~rule_id here?? bug? *)
+    E.mk_error None loc s OutJ.SemgrepMatchFound
+  in
+  let (config : Core_scan_config.t) =
+    {
+      config with
+      lang = Some (Xlang.of_lang Yaml);
+      rule_source = Some (Rule_file metachecks);
+      output_format = Json true;
+      (* the targets are actually the rules! metachecking! *)
+      roots = List_.map Scanning_root.of_fpath rules;
+    }
+  in
+  let res = Core_scan.scan_with_exn_handler caps config in
+  match res with
+  | Ok result ->
+      result.processed_matches
+      |> List_.map (fun (m : Core_result.processed_match) -> m.pm)
+      |> List_.map match_to_semgrep_error
+  | Error (exn, _) -> Exception.reraise exn
+
+(* TODO *)
+
+(* We parse the parsing function fparser (Parser_rule.parse) to avoid
+ * circular dependencies.
+ * Similar to Test_parsing.test_parse_rules.
+ *)
+let run_checks (caps : < Cap.tmp >) config fparser metachecks xs =
+  let yaml_xs, skipped_paths =
+    xs
+    |> File_type.files_of_dirs_or_files (function
+         | FT.Config (FT.Yaml (*FT.Json |*) | FT.Jsonnet) -> true
+         | _ -> false)
+    |> Skip_code.filter_files_if_skip_list ~root:xs
+  in
+  let rules, more_skipped_paths =
+    List.partition (fun file -> not (!!file =~ ".*\\.test\\.yaml")) yaml_xs
+  in
+  let _skipped_paths = more_skipped_paths @ skipped_paths in
+  match rules with
+  | [] ->
+      Logs.err (fun m ->
+          m "no valid yaml rules to run on (.test.yaml files are excluded)");
+      []
+  | _ ->
+      let semgrep_found_errs = semgrep_check caps config metachecks rules in
+      let ocaml_found_errs =
+        rules
+        |> List.concat_map (fun file ->
+               Logs.info (fun m ->
+                   m "run_checks: processing rule file %s" !!file);
+               try
+                 let rs = fparser file in
+                 rs |> List.concat_map (fun file -> check file)
+               with
+               (* TODO this error is special cased because YAML files that *)
+               (* aren't semgrep rules are getting scanned *)
+               | R.Error { kind = InvalidYaml _; _ } -> []
+               | exn ->
+                   let e = Exception.catch exn in
+                   [ E.exn_to_error None !!file e ])
+      in
+      semgrep_found_errs @ ocaml_found_errs
+
+(* for semgrep-core -check_rules *)
+let check_files (caps : < Cap.stdout ; Cap.tmp >) mk_config fparser input =
+  let config = mk_config () in
+  let errors =
+    match input with
+    | []
+    | [ _ ] ->
+        raise
+          (No_metacheck_file
+             "check_rules needs a metacheck file or directory and rules to run \
+              on")
+    | metachecks :: xs ->
+        run_checks (caps :> < Cap.tmp >) config fparser metachecks xs
+  in
+  match config.output_format with
+  | Text ->
+      errors
+      |> List.iter (fun err ->
+             Logs.err (fun m -> m "%s" (E.string_of_error err)))
+  | Json _ ->
+      let (res : Core_result.t) =
+        Core_result.mk_final_result_with_just_errors errors
+      in
+      let json = Core_json_output.core_output_of_matches_and_errors res in
+      CapConsole.print caps#stdout (SJ.string_of_core_output json)
+
+(* for semgrep-core -stat_rules *)
+let stat_files (caps : < Cap.stdout >) fparser xs =
+  let fullxs, _skipped_paths =
+    xs
+    |> File_type.files_of_dirs_or_files (function
+         | FT.Config (FT.Yaml (*FT.Json |*) | FT.Jsonnet) -> true
+         | _ -> false)
+    |> Skip_code.filter_files_if_skip_list ~root:xs
+  in
+  let good = ref 0 in
+  let bad = ref 0 in
+  let cache = Some (Hashtbl.create 101) in
+  fullxs
+  |> List.iter (fun file ->
+         Logs.info (fun m -> m "stat_files: processing rule file %s" !!file);
+         let rs = fparser file in
+         rs
+         |> List.iter (fun r ->
+                let res = Analyze_rule.regexp_prefilter_of_rule ~cache r in
+                match res with
+                | None ->
+                    incr bad;
+                    Logs.warn (fun m ->
+                        m "no regexp prefilter for rule %s:%s" !!file
+                          (Rule_ID.to_string (fst r.id)))
+                | Some (f, _f) ->
+                    incr good;
+                    let s = Semgrep_prefilter_j.string_of_formula f in
+                    Logs.debug (fun m -> m "regexp: %s" s)));
+  CapConsole.print caps#stdout
+    (spf "good = %d, no regexp found = %d" !good !bad)
